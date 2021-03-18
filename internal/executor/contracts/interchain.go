@@ -2,9 +2,12 @@ package contracts
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/meshplus/bitxhub-kit/crypto/asym/ecdsa"
 
 	"github.com/bitxhub/bitxid"
 	appchainMgr "github.com/meshplus/bitxhub-core/appchain-mgr"
@@ -184,10 +187,19 @@ func (x *InterchainManager) checkIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) 
 		x.Logger().WithField("chain_id", ibtp.To).Debug("target appchain does not exist")
 	}
 
+	srcChainInfo, err := x.getAppchainInfo(ibtp.From)
+	if err != nil {
+		return err
+	}
 	if pb.IBTP_INTERCHAIN == ibtp.Type ||
 		pb.IBTP_ASSET_EXCHANGE_INIT == ibtp.Type ||
 		pb.IBTP_ASSET_EXCHANGE_REDEEM == ibtp.Type ||
 		pb.IBTP_ASSET_EXCHANGE_REFUND == ibtp.Type {
+		if srcChainInfo.ChainType != appchainMgr.RelaychainType {
+			if err := x.checkPubKeyAndCaller(srcChainInfo.PublicKey); err != nil {
+				return fmt.Errorf("caller is not bind to ibtp from: %w", err)
+			}
+		}
 		idx := interchain.InterchainCounter[ibtp.To]
 		if ibtp.Index <= idx {
 			return fmt.Errorf(fmt.Sprintf("index already exists, required %d, but %d", idx+1, ibtp.Index))
@@ -196,6 +208,15 @@ func (x *InterchainManager) checkIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) 
 			return fmt.Errorf(fmt.Sprintf("wrong index, required %d, but %d", idx+1, ibtp.Index))
 		}
 	} else {
+		if srcChainInfo.ChainType != appchainMgr.RelaychainType {
+			destChainInfo, err := x.getAppchainInfo(ibtp.To)
+			if err != nil {
+				return err
+			}
+			if err := x.checkPubKeyAndCaller(destChainInfo.PublicKey); err != nil {
+				return fmt.Errorf("caller is not bind to ibtp to")
+			}
+		}
 		idx := interchain.ReceiptCounter[ibtp.To]
 		if ibtp.Index <= idx {
 			return fmt.Errorf(fmt.Sprintf("receipt index already exists, required %d, but %d", idx+1, ibtp.Index))
@@ -209,14 +230,33 @@ func (x *InterchainManager) checkIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) 
 	return nil
 }
 
-// isRelayIBTP returns whether ibtp.from is relaychain type
-func (x *InterchainManager) isRelayIBTP(from string) bool {
-	srcChain := &appchainMgr.Appchain{}
-	res := x.CrossInvoke(constant.AppchainMgrContractAddr.String(), "GetAppchain", pb.String(from))
-	if err := json.Unmarshal(res.Result, srcChain); err != nil {
-		return false
+func (x *InterchainManager) checkPubKeyAndCaller(pub string) error {
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(pub)
+	if err != nil {
+		return err
 	}
-	return srcChain.ChainType == appchainMgr.RelaychainType
+	pubKey, err := ecdsa.UnmarshalPublicKey(pubKeyBytes, crypto.Secp256k1)
+	if err != nil {
+		return fmt.Errorf("decrypt registerd public key error: %w", err)
+	}
+	addr, err := pubKey.Address()
+	if err != nil {
+		return fmt.Errorf("decrypt registerd public key error: %w", err)
+	}
+	if addr.String() != x.Caller() {
+		return fmt.Errorf("chain pub key derived address != caller")
+	}
+	return nil
+}
+
+// isRelayIBTP returns whether ibtp.from is relaychain type
+func (x *InterchainManager) getAppchainInfo(chainMethod string) (*appchainMgr.Appchain, error) {
+	srcChain := &appchainMgr.Appchain{}
+	res := x.CrossInvoke(constant.AppchainMgrContractAddr.String(), "GetAppchain", pb.String(chainMethod))
+	if err := json.Unmarshal(res.Result, srcChain); err != nil {
+		return nil, fmt.Errorf("unmarshal appchain info error: %w", err)
+	}
+	return srcChain, nil
 }
 
 func (x *InterchainManager) ProcessIBTP(ibtp *pb.IBTP, interchain *pb.Interchain) {
@@ -302,6 +342,11 @@ func (x *InterchainManager) GetIBTPByID(id string) *boltvm.Response {
 	if len(arr) != 3 {
 		return boltvm.Error("wrong ibtp id")
 	}
+	// todo: add access control to get ibtp in did
+	//caller := x.Caller()
+	//if caller != arr[0] && caller != arr[1] {
+	//	return boltvm.Error("The caller does not have access to this ibtp")
+	//}
 	srcAppchainMethod := arr[0]
 	dstAppchainMethod := arr[1]
 	if !bitxid.DID(srcAppchainMethod).IsValidFormat() || !bitxid.DID(dstAppchainMethod).IsValidFormat() {
