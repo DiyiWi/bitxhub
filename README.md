@@ -28,7 +28,7 @@ For more details please visit our [whitepaper](https://upload.hyperchain.cn/BitX
 
 
 
-## Usage
+## Usage?
 
 Usage guide can be found in [wiki](https://github.com/meshplus/bitxhub/wiki).
 
